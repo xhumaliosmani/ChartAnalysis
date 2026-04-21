@@ -1,77 +1,114 @@
-"""SQLite-backed trade journal.
+"""Journal storage — SQLAlchemy, works on SQLite (local) or Postgres (prod).
 
-One table: `trades`. Each row is one analysis. Outcome fields start empty
-and are filled in when the user marks the trade won/lost/BE.
+Backend selection:
+    - DATABASE_URL env/secret set  -> use that (Postgres on Neon/Supabase/etc).
+    - otherwise                    -> sqlite:///journal.db next to this file.
+
+Legacy `postgres://` URLs (as emitted by Heroku/Neon) are auto-rewritten
+to `postgresql+psycopg2://` which SQLAlchemy 2.x requires.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
-from contextlib import contextmanager
+import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-DB_PATH = Path(__file__).parent / "journal.db"
+from sqlalchemy import (
+    Column, Float, Integer, MetaData, String, Table, Text,
+    create_engine, delete, select, text, update,
+)
+from sqlalchemy.engine import Engine
 
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS trades (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at      TEXT    NOT NULL,
-    instrument      TEXT,
-    timeframe       TEXT,
-    direction       TEXT    NOT NULL,
-    conviction      INTEGER NOT NULL,
-    market_structure TEXT,
-    entry_zone      TEXT,
-    entry_price     REAL,
-    entry_trigger   TEXT,
-    stop_loss       TEXT,
-    stop_price      REAL,
-    target1         TEXT,
-    target1_price   REAL,
-    target2         TEXT,
-    target2_price   REAL,
-    risk_reward     TEXT,
-    invalidation    TEXT,
-    summary         TEXT,
-    factors_json    TEXT,
-    conflicts_json  TEXT,
-    user_notes      TEXT,
-
-    account_size    REAL,
-    risk_pct        REAL,
-    risk_dollars    REAL,
-    position_size   REAL,
-
-    status          TEXT    DEFAULT 'pending',
-    actual_entry    REAL,
-    actual_exit     REAL,
-    r_multiple      REAL,
-    pnl_dollars     REAL,
-    closed_at       TEXT,
-    outcome_notes   TEXT
-);
-"""
+try:  # pragma: no cover - streamlit only present in app context
+    import streamlit as st
+except Exception:  # noqa: BLE001
+    st = None  # type: ignore[assignment]
 
 
-@contextmanager
-def _conn():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    try:
-        yield con
-        con.commit()
-    finally:
-        con.close()
+_LOCAL_SQLITE = f"sqlite:///{Path(__file__).parent / 'journal.db'}"
+
+
+def _get_database_url() -> str:
+    url: str | None = None
+    if st is not None:
+        try:
+            url = st.secrets.get("DATABASE_URL")  # type: ignore[attr-defined]
+        except (FileNotFoundError, KeyError, AttributeError):
+            url = None
+    if not url:
+        url = os.getenv("DATABASE_URL")
+    if not url:
+        return _LOCAL_SQLITE
+    # Neon/Heroku-style scheme rewrite
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg2://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
+_engine: Engine | None = None
+metadata = MetaData()
+
+trades = Table(
+    "trades", metadata,
+    Column("id",              Integer, primary_key=True, autoincrement=True),
+    Column("created_at",      String(40), nullable=False),
+    Column("instrument",      String(64)),
+    Column("timeframe",       String(16)),
+    Column("direction",       String(8), nullable=False),
+    Column("conviction",      Integer, nullable=False),
+    Column("market_structure", Text),
+    Column("entry_zone",      Text),
+    Column("entry_price",     Float),
+    Column("entry_trigger",   Text),
+    Column("stop_loss",       Text),
+    Column("stop_price",      Float),
+    Column("target1",         Text),
+    Column("target1_price",   Float),
+    Column("target2",         Text),
+    Column("target2_price",   Float),
+    Column("risk_reward",     Text),
+    Column("invalidation",    Text),
+    Column("summary",         Text),
+    Column("factors_json",    Text),
+    Column("conflicts_json",  Text),
+    Column("user_notes",      Text),
+
+    Column("account_size",    Float),
+    Column("risk_pct",        Float),
+    Column("risk_dollars",    Float),
+    Column("position_size",   Float),
+
+    Column("status",          String(16), default="pending"),
+    Column("actual_entry",    Float),
+    Column("actual_exit",     Float),
+    Column("r_multiple",      Float),
+    Column("pnl_dollars",     Float),
+    Column("closed_at",       String(40)),
+    Column("outcome_notes",   Text),
+)
+
+
+def _get_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        url = _get_database_url()
+        connect_args: dict[str, Any] = {}
+        if url.startswith("sqlite"):
+            connect_args["check_same_thread"] = False
+        _engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+    return _engine
 
 
 def init_db() -> None:
-    with _conn() as con:
-        con.executescript(SCHEMA)
+    metadata.create_all(_get_engine())
 
+
+# ----- Write ---------------------------------------------------------------
 
 def save_decision(
     decision: dict[str, Any],
@@ -110,32 +147,11 @@ def save_decision(
         "risk_pct": risk_pct,
         "risk_dollars": risk_dollars,
         "position_size": position_size,
+        "status": "pending",
     }
-
-    cols = ",".join(row.keys())
-    placeholders = ",".join("?" for _ in row)
-    with _conn() as con:
-        cur = con.execute(
-            f"INSERT INTO trades ({cols}) VALUES ({placeholders})",
-            tuple(row.values()),
-        )
-        return int(cur.lastrowid)
-
-
-def list_trades(status_filter: str | None = None) -> list[sqlite3.Row]:
-    q = "SELECT * FROM trades"
-    args: tuple = ()
-    if status_filter and status_filter != "all":
-        q += " WHERE status = ?"
-        args = (status_filter,)
-    q += " ORDER BY created_at DESC"
-    with _conn() as con:
-        return list(con.execute(q, args))
-
-
-def get_trade(trade_id: int) -> sqlite3.Row | None:
-    with _conn() as con:
-        return con.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
+    with _get_engine().begin() as con:
+        result = con.execute(trades.insert().values(**row))
+        return int(result.inserted_primary_key[0])
 
 
 def update_outcome(
@@ -145,9 +161,8 @@ def update_outcome(
     actual_exit: float | None,
     outcome_notes: str | None,
 ) -> None:
-    """Compute R multiple and $ P&L from the recorded stop distance."""
-    trade = get_trade(trade_id)
-    if trade is None:
+    t = get_trade(trade_id)
+    if t is None:
         return
 
     r_multiple: float | None = None
@@ -157,70 +172,76 @@ def update_outcome(
         status in ("win", "loss", "breakeven")
         and actual_entry is not None
         and actual_exit is not None
-        and trade["stop_price"] is not None
+        and t.get("stop_price") is not None
     ):
-        risk_per_unit = abs(actual_entry - trade["stop_price"])
+        risk_per_unit = abs(actual_entry - t["stop_price"])
         if risk_per_unit > 0:
-            direction = trade["direction"]
+            direction = t["direction"]
             pnl_per_unit = (
                 (actual_exit - actual_entry)
                 if direction == "long"
                 else (actual_entry - actual_exit)
             )
             r_multiple = pnl_per_unit / risk_per_unit
-            if trade["position_size"] is not None:
-                pnl = pnl_per_unit * trade["position_size"]
+            if t.get("position_size") is not None:
+                pnl = pnl_per_unit * t["position_size"]
 
-    with _conn() as con:
+    with _get_engine().begin() as con:
         con.execute(
-            """
-            UPDATE trades
-               SET status = ?,
-                   actual_entry = ?,
-                   actual_exit = ?,
-                   r_multiple = ?,
-                   pnl_dollars = ?,
-                   outcome_notes = ?,
-                   closed_at = ?
-             WHERE id = ?
-            """,
-            (
-                status,
-                actual_entry,
-                actual_exit,
-                r_multiple,
-                pnl,
-                outcome_notes,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                trade_id,
-            ),
+            update(trades).where(trades.c.id == trade_id).values(
+                status=status,
+                actual_entry=actual_entry,
+                actual_exit=actual_exit,
+                r_multiple=r_multiple,
+                pnl_dollars=pnl,
+                outcome_notes=outcome_notes,
+                closed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
         )
 
 
 def delete_trade(trade_id: int) -> None:
-    with _conn() as con:
-        con.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+    with _get_engine().begin() as con:
+        con.execute(delete(trades).where(trades.c.id == trade_id))
 
 
-# ----- Stats ----------------------------------------------------------------
+# ----- Read ----------------------------------------------------------------
+
+def _row_to_dict(row: Any) -> dict[str, Any]:
+    return dict(row._mapping)
+
+
+def list_trades(status_filter: str | None = None) -> list[dict[str, Any]]:
+    q = select(trades)
+    if status_filter and status_filter != "all":
+        q = q.where(trades.c.status == status_filter)
+    q = q.order_by(trades.c.created_at.desc())
+    with _get_engine().connect() as con:
+        return [_row_to_dict(r) for r in con.execute(q)]
+
+
+def get_trade(trade_id: int) -> dict[str, Any] | None:
+    with _get_engine().connect() as con:
+        row = con.execute(select(trades).where(trades.c.id == trade_id)).first()
+        return _row_to_dict(row) if row is not None else None
+
+
+# ----- Stats ---------------------------------------------------------------
 
 def _pct(n: int, d: int) -> float:
     return (100.0 * n / d) if d else 0.0
 
 
 def stats_summary() -> dict[str, Any]:
-    with _conn() as con:
-        rows = list(con.execute(
-            "SELECT status, conviction, r_multiple, pnl_dollars, direction "
-            "FROM trades WHERE status IN ('win','loss','breakeven')"
-        ))
+    with _get_engine().connect() as con:
+        rows = [_row_to_dict(r) for r in con.execute(
+            select(trades).where(trades.c.status.in_(("win", "loss", "breakeven")))
+        )]
 
-    total = len(rows)
     wins = sum(1 for r in rows if r["status"] == "win")
     losses = sum(1 for r in rows if r["status"] == "loss")
     be = sum(1 for r in rows if r["status"] == "breakeven")
-
-    decided = wins + losses  # BE excluded from win rate denominator
+    decided = wins + losses
     win_rate = _pct(wins, decided)
 
     rs = [r["r_multiple"] for r in rows if r["r_multiple"] is not None]
@@ -229,19 +250,23 @@ def stats_summary() -> dict[str, Any]:
     pnls = [r["pnl_dollars"] for r in rows if r["pnl_dollars"] is not None]
     total_pnl = sum(pnls) if pnls else 0.0
 
-    # Conviction buckets
-    buckets = {"0-34 (flat/low)": [], "35-54 (weak)": [], "55-69 (medium)": [], "70-92 (strong)": []}
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "0-34 (flat/low)":  [],
+        "35-54 (weak)":     [],
+        "55-69 (medium)":   [],
+        "70-92 (strong)":   [],
+    }
     for r in rows:
-        c = r["conviction"] or 0
+        c = r.get("conviction") or 0
         if c < 35:
-            b = "0-34 (flat/low)"
+            key = "0-34 (flat/low)"
         elif c < 55:
-            b = "35-54 (weak)"
+            key = "35-54 (weak)"
         elif c < 70:
-            b = "55-69 (medium)"
+            key = "55-69 (medium)"
         else:
-            b = "70-92 (strong)"
-        buckets[b].append(r)
+            key = "70-92 (strong)"
+        buckets[key].append(r)
 
     bucket_stats = []
     for name, brows in buckets.items():
@@ -256,7 +281,7 @@ def stats_summary() -> dict[str, Any]:
         })
 
     return {
-        "total_closed": total,
+        "total_closed": len(rows),
         "wins": wins,
         "losses": losses,
         "breakeven": be,
@@ -267,9 +292,11 @@ def stats_summary() -> dict[str, Any]:
     }
 
 
-def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {k: row[k] for k in row.keys()}
-
-
-def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
-    return [row_to_dict(r) for r in rows]
+def backend_label() -> str:
+    """Human-readable name of the current backend (for diagnostics)."""
+    url = _get_database_url()
+    if url.startswith("sqlite"):
+        return "SQLite (local)"
+    if "postgres" in url:
+        return "PostgreSQL"
+    return url.split("://", 1)[0]

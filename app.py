@@ -24,10 +24,10 @@ from dotenv import load_dotenv
 from PIL import Image
 
 import db
+from auth import require_auth, sign_out_button
 from prompts import MTF_PROMPT_TEMPLATE, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 load_dotenv()
-db.init_db()
 
 MODEL = "claude-opus-4-7"
 MAX_TOKENS = 2048
@@ -474,6 +474,12 @@ def stats_tab() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Chart Analyzer", layout="wide")
+
+    # Gate everything behind the password if APP_PASSWORD is set.
+    require_auth()
+
+    db.init_db()
+
     st.title("Trading Chart Analyzer")
     st.caption(
         "Upload chart screenshots. Get a disciplined long/short/no-trade "
@@ -489,6 +495,10 @@ def main() -> None:
             "App settings → Secrets."
         )
         st.stop()
+
+    with st.sidebar:
+        st.caption(f"Storage: {db.backend_label()}")
+        sign_out_button()
 
     t1, t2, t3 = st.tabs(["Analyze", "Journal", "Stats"])
     with t1:
