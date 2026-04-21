@@ -1,21 +1,40 @@
 # Trading Chart Analyzer
 
-Upload a candlestick chart screenshot; get back a structured trade decision
+Upload candlestick chart screenshots; get back a structured trade decision
 (long / short / no-trade), a conviction score, entry zone, stop, targets,
-and the confluence factors driving the call.
+sized position, and a confluence breakdown. Save each call to a local
+journal, mark outcomes, and watch real win rate stats build up over time.
 
-The analyst is Claude (`claude-opus-4-7`) with a system prompt that encodes
-documented technical-analysis frameworks: Dow market structure,
-support/resistance, 50/200 EMA trend, candlestick reversals at key levels,
-classic chart patterns, Fibonacci retracements, RSI/MACD divergence,
-Bollinger squeezes, and Wyckoff volume analysis.
+The analyst is Claude (`claude-opus-4-7`) with a system prompt that
+encodes documented TA frameworks: Dow market structure, support/resistance,
+50/200 EMA trend, candlestick reversals at key levels, chart patterns,
+Fibonacci retracements, RSI/MACD divergence, Bollinger squeezes, and
+Wyckoff volume analysis.
 
-## Guardrails it follows
+## Features
 
-- **2+ aligned factors required.** A single indicator is never a trade.
-- **Conviction is capped at 92.** Certainty is a red flag in markets.
-- **R:R < 1.5 is auto-rejected** even when conviction is high.
-- **"No trade" is a valid output.** Most charts do not present an A+ setup.
+- **Single-chart mode** — drop one screenshot, get a call.
+- **Multi-timeframe mode** — upload a higher timeframe (bias) and lower
+  timeframe (entry) chart together; the model uses HTF trend as a
+  confluence factor and triggers off the LTF.
+- **Position sizing** — enter account size and risk % (default 1%);
+  when the model extracts numeric entry/stop from the chart, you get
+  the exact position size in units.
+- **Trade journal (SQLite)** — save each analysis, then mark the outcome
+  (win / loss / BE / skipped) with the actual entry and exit prices.
+  R multiple and $ P&L are computed automatically.
+- **Stats tab** — overall win rate, average R, total P&L, and win rate
+  broken down by conviction bucket. This is the real test: if the
+  70–92 bucket doesn't materially outperform the 35–54 bucket, the
+  setup quality isn't translating into edge.
+
+## Guardrails baked into the prompt
+
+- **2+ independent factors required.** A single indicator is noise.
+- **Conviction capped at 92.** No false certainty.
+- **R:R < 1.5 is auto-rejected** even on high-conviction setups.
+- **"No trade" is a valid, encouraged output.** Forcing trades on every
+  chart is the #1 way to collapse a win rate.
 
 ## Setup
 
@@ -34,25 +53,19 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-Open the URL Streamlit prints (usually http://localhost:8501), drop a
-chart screenshot in, optionally add notes in the sidebar, and click
-**Analyze chart**.
+Open the URL Streamlit prints (usually http://localhost:8501).
 
-## Output
+## Files
 
-You get:
-
-- **Direction** — LONG / SHORT / NO TRADE
-- **Conviction** — 0–92, colour-coded
-- **Market structure** read
-- **Entry plan** — type, price zone, trigger
-- **Stop loss, T1, T2, R:R, invalidation level**
-- **Confluence factors** that support the call
-- **Conflicting signals** that argue against it
-- Raw JSON for programmatic use
+- `app.py` — Streamlit UI (Analyze / Journal / Stats tabs)
+- `prompts.py` — TA system prompt + single-chart and MTF user prompts
+- `db.py` — SQLite-backed journal, sizing math, outcome stats
+- `journal.db` — created on first run (gitignored)
 
 ## Disclaimer
 
 This tool is for educational analysis. It is not financial advice. No
 technical-analysis method wins 100% of the time; the edge comes from
-disciplined risk management and selective entries.
+disciplined risk management and selective entries. The stats tab is
+there so you can honestly evaluate whether this assistant's calls
+perform for *you* on *your* markets.

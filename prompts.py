@@ -142,13 +142,21 @@ this schema exactly:
   "entry": { "type": "market" | "limit" | "stop" | "wait",
              "price_zone": string,    // e.g. "45,200-45,350" or "on retest of 1.0820"
              "trigger": string },     // e.g. "bullish engulfing close above 20 EMA"
+  "entry_price_numeric": number | null,   // midpoint of the entry zone if inferable, else null
   "stop_loss": string,                 // price or descriptive level
+  "stop_loss_numeric": number | null,  // numeric stop price if inferable, else null
   "targets": { "t1": string, "t2": string },
+  "target1_numeric": number | null,    // numeric T1 if inferable, else null
+  "target2_numeric": number | null,    // numeric T2 if inferable, else null
   "risk_reward": string,               // e.g. "1:2.3 to T1, 1:4.1 to T2"
   "invalidation": string,              // what must happen to prove the thesis wrong
   "summary": string,                   // 2-3 sentence plain-English trade plan
   "disclaimer": "Not financial advice. Past patterns do not guarantee future results."
 }
+
+NUMERIC FIELDS: extract real numbers from the visible price axis. If the
+chart does not show a clear price scale (or prices are not legible),
+return null for those four numeric fields rather than guessing.
 
 If direction is "flat", still fill every field honestly:
 - entry.type = "wait"
@@ -164,4 +172,29 @@ User-provided context (may be empty): {user_notes}
 
 Remember: if the chart does not present a clear A+ confluence setup,
 return direction="flat". Do not force a trade.
+"""
+
+
+MTF_PROMPT_TEMPLATE = """You have been given TWO charts of the SAME instrument at different timeframes.
+
+- Image 1 = HIGHER timeframe (HTF). Use it ONLY for directional bias and
+  major S/R levels. Do not take entries from it.
+- Image 2 = LOWER timeframe (LTF). Use it for the entry trigger, precise
+  entry zone, stop placement, and immediate targets.
+
+Rules:
+1. If the LTF signal contradicts the HTF trend, you may only recommend a
+   trade if a confirmed reversal (BOS + CHoCH) is visible on the LTF.
+   Otherwise direction="flat".
+2. HTF trend with LTF pullback-and-trigger in the same direction = the
+   highest-quality setup; count HTF alignment as ONE factor on top of the
+   LTF factors.
+3. Conviction ceiling is still 92. R:R < 1.5 is still auto-reject.
+4. Use numeric prices from the LTF chart (it has tighter scale).
+
+Return the same JSON schema as for single charts. In `market_structure`,
+describe BOTH timeframes in one sentence
+(e.g. "HTF 4H uptrend, LTF 15m pulling back into 50 EMA + 0.618 Fib").
+
+User-provided context (may be empty): {user_notes}
 """

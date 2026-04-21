@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .streamlit/secrets.toml
 .DS_Store
+journal.db
+journal.db-journal
