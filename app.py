@@ -33,6 +33,17 @@ MODEL = "claude-opus-4-7"
 MAX_TOKENS = 2048
 
 
+def _get_api_key() -> str | None:
+    """Prefer Streamlit Cloud secrets; fall back to env var for local dev."""
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY")  # type: ignore[attr-defined]
+        if key:
+            return str(key)
+    except (FileNotFoundError, KeyError, AttributeError):
+        pass
+    return os.getenv("ANTHROPIC_API_KEY")
+
+
 # ----- Claude call ----------------------------------------------------------
 
 def _img_block(image_bytes: bytes, media_type: str) -> dict[str, Any]:
@@ -470,11 +481,12 @@ def main() -> None:
         "tracks how well the calls actually perform."
     )
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = _get_api_key()
     if not api_key:
         st.error(
-            "ANTHROPIC_API_KEY is not set. Copy `.env.example` to `.env`, "
-            "paste your key, and restart."
+            "ANTHROPIC_API_KEY is not set. Locally: copy `.env.example` to "
+            "`.env` and paste your key. On Streamlit Cloud: set it in "
+            "App settings → Secrets."
         )
         st.stop()
 
